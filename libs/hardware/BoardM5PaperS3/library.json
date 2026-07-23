@@ -1,0 +1,13 @@
+{
+  "name": "BoardM5PaperS3",
+  "version": "0.1.0",
+  "description": "FreeInk board support for M5Stack Paper S3: parallel EPD pins and LgfxEpdConfig for the 960x540 ED047TC1 panel driven via LovyanGFX.",
+  "keywords": "m5stack, m5paper, papers3, epaper, board",
+  "authors": [{"name": "FreeInk SDK Contributors"}],
+  "dependencies": {
+    "BoardConfig": "*",
+    "EInkDisplay": "*"
+  },
+  "platforms": "espressif32",
+  "frameworks": ["arduino"]
+}
