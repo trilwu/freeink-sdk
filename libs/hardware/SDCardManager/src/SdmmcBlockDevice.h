@@ -20,7 +20,12 @@
 // to the generic FsBlockDeviceInterface (set in the de-link build env).
 #include <SdFat.h>  // FsBlockDeviceInterface, Sector_t
 
-struct sdmmc_card_t;  // forward decl (esp-idf type)
+// esp-idf declares sdmmc_card_t as an anonymous-struct typedef
+// (sd_protocol_types.h), so it cannot be forward-declared: `struct sdmmc_card_t;`
+// introduces a *different*, incomplete type and the translation unit fails with
+// "conflicting declaration" plus "invalid application of sizeof to incomplete
+// type" once the real header lands. Include the public type header instead.
+#include "driver/sdmmc_types.h"
 
 namespace freeink {
 

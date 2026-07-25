@@ -16,6 +16,19 @@ bool SDCardManager::begin() {
   // esp-idf SDMMC block device. FsFile from this volume is the same type the SPI
   // path returns, so the public API and consumers are unchanged.
   if (_powerHook) _powerHook();  // board brings up its SD rail (e.g. PMIC) if needed
+
+  // Same GPIO-gated rail handling as the SPI path below: an SDMMC board can gate
+  // its slot too (Murphy M3 drives GPIO10 low immediately before mount, mirroring
+  // the OEM firmware). Without this the card never powers up and sdmmc_card_init
+  // fails at 0x107/0x108. No-op when powerEnable is unassigned.
+  if (BoardConfig::ACTIVE.sd.powerEnable >= 0) {
+    gpio_hold_dis(static_cast<gpio_num_t>(BoardConfig::ACTIVE.sd.powerEnable));
+    pinMode(BoardConfig::ACTIVE.sd.powerEnable, OUTPUT);
+    digitalWrite(BoardConfig::ACTIVE.sd.powerEnable,
+                 BoardConfig::ACTIVE.sd.powerEnableActiveLow ? LOW : HIGH);
+    delay(10);
+  }
+
   if (!_dev) _dev = new freeink::SdmmcBlockDevice();
   if (!_dev->begin(BoardConfig::ACTIVE.sdmmc)) {
     if (Serial) Serial.printf("[%lu] [SD] SDMMC init failed\n", millis());
@@ -56,14 +69,16 @@ bool SDCardManager::begin() {
   if (_powerHook) _powerHook();  // board brings up its SD rail (e.g. PMIC) if needed
 
   // Boards that gate the SD rail with a plain GPIO (e.g. Sticky's SD_PWR_EN on
-  // GPIO10) must power it before probing. Active-high enable + a brief settle.
+  // GPIO10) must power it before probing. Enable + a brief settle; polarity comes
+  // from the profile (active-high default).
   // No-op when unassigned, and complements _powerHook for PMIC-gated boards.
   // gpio_hold_dis first: the sleep path holds this pin LOW and the hold survives
-  // the deep-sleep wake reset; the HIGH write is a no-op until it is released.
+  // the deep-sleep wake reset; the enable write is a no-op until it is released.
   if (BoardConfig::ACTIVE.sd.powerEnable >= 0) {
     gpio_hold_dis(static_cast<gpio_num_t>(BoardConfig::ACTIVE.sd.powerEnable));
     pinMode(BoardConfig::ACTIVE.sd.powerEnable, OUTPUT);
-    digitalWrite(BoardConfig::ACTIVE.sd.powerEnable, HIGH);
+    digitalWrite(BoardConfig::ACTIVE.sd.powerEnable,
+                 BoardConfig::ACTIVE.sd.powerEnableActiveLow ? LOW : HIGH);
     delay(10);
   }
 

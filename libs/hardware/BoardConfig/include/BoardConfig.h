@@ -216,11 +216,12 @@
 #define FREEINK_FB_PSRAM (FREEINK_DEVICE_M5PAPER)
 #endif
 
-// SD transport. de-link is wired for 4-bit SDMMC; SdFat can't drive SDIO, so it
-// gets a native esp-idf SDMMC block device behind SDCardManager. Every other
-// board stays on SdFat-over-SPI. Override with -DFREEINK_SD_SDMMC=0/1.
+// SD transport. de-link and Murphy M3 are wired for 4-bit SDMMC; SdFat can't
+// drive SDIO, so they get a native esp-idf SDMMC block device behind
+// SDCardManager. Every other board stays on SdFat-over-SPI. Override with
+// -DFREEINK_SD_SDMMC=0/1.
 #ifndef FREEINK_SD_SDMMC
-#define FREEINK_SD_SDMMC (FREEINK_DEVICE_DELINK)
+#define FREEINK_SD_SDMMC (FREEINK_DEVICE_DELINK || FREEINK_DEVICE_MURPHY)
 #endif
 
 // Serial log transport hint for consumer firmware. Boards can share the same MCU
@@ -303,6 +304,11 @@ struct SdPins {
   int8_t powerEnable;
   bool separateSpi;
   uint32_t spiHz;  // 0 = use the SD manager default (40 MHz)
+  // Polarity of powerEnable. Default false = drive HIGH to power the card
+  // (Sticky's SD_PWR_EN). Murphy M3 gates its slot the other way: the OEM
+  // firmware drives GPIO10 LOW immediately before mount and HIGH in the
+  // cleanup path, so that profile sets this true.
+  bool powerEnableActiveLow = false;
 };
 
 // 4-bit SDMMC/SDIO wiring (e.g. de-link). SdFat can't drive SDIO, so a board with
@@ -679,7 +685,11 @@ constexpr BoardProfile MURPHY_M3 = {
     240,
     {4, 3, 5, 6, 7, 8, PIN_UNASSIGNED},
     0,  // displaySpiHz: 0 -> Murphy UC8253 driver default (4 MHz)
-    {39, 13, 40, 10, PIN_UNASSIGNED, true, 0},
+    // SD is native 4-bit SDMMC (see the sdmmc field below), so there are no SPI
+    // SD pins. The old {39, 13, 40} guess came from the public CrowPanel wiki and
+    // is wrong for Murphy: 39/40 are proven I2S audio pins and 13 is the shared
+    // I2C SDA. Only powerEnable is real — GPIO10, active LOW.
+    {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, 10, true, 0, true},
     {PIN_UNASSIGNED, 0, PIN_UNASSIGNED, PIN_UNASSIGNED, 1, 2, 0, false},
     9,               // batteryAdc: stock firmware samples analogRead(9) for battery voltage
     PIN_UNASSIGNED,  // batteryChargeStatus: not identified
@@ -687,13 +697,14 @@ constexpr BoardProfile MURPHY_M3 = {
     PIN_UNASSIGNED,
     {TouchController::Chsc6x, 13, 12, 44, 45, 0x2e, 24, 224, 24, 398, false, 0, true, false},
     {48, 25000, 10, true},
-    // NOTE: the SPI SD pin guess above (39/13/40) predates the OEM firmware
-    // audio recovery and conflicts with the proven I2S pins (39/40/41/42) and
-    // shared I2C (13). Audio is the verified owner of those pins.
     MURPHY_AUDIO,
     NO_LEDS,
     NO_FLIP,
-    NO_SDMMC,
+    // 4-bit SDMMC recovered from the OEM binary: the MoFei firmware calls
+    // SD_MMC.setPins(16, 17, 15, 14, 21, 18) then SD_MMC.begin(..., mode1bit=false)
+    // with GPIO10 held low. Static recovery is solid (the six args land in
+    // sdmmc_slot_config_t field order); live mount is still unconfirmed.
+    {16, 17, 15, 14, 21, 18, 4},
     NO_GAUGE};
 
 // --- de-link (X4-class GDEQ0426T82 panel on ESP32-S3) — SSD1677 + frontlight ---
@@ -1037,7 +1048,7 @@ inline void releaseSdRail() {
   if (ACTIVE.sd.powerEnable >= 0) {
     gpio_hold_dis(static_cast<gpio_num_t>(ACTIVE.sd.powerEnable));
     pinMode(ACTIVE.sd.powerEnable, OUTPUT);
-    digitalWrite(ACTIVE.sd.powerEnable, HIGH);
+    digitalWrite(ACTIVE.sd.powerEnable, ACTIVE.sd.powerEnableActiveLow ? LOW : HIGH);
   }
   if (ACTIVE.sd.cs >= 0) {
     pinMode(ACTIVE.sd.cs, OUTPUT);
