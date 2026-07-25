@@ -48,6 +48,49 @@ constexpr uint8_t EPD_LINE_PADDING = 8;
 // handles rotated reader layouts on top of this.
 constexpr uint8_t EPD_ROTATION = 0;
 
+// EPD rail power hooks. FreeInkBusEPD::powerControl() overrides LovyanGFX's base
+// and calls ONLY these hooks (it never invokes Bus_EPD::powerControl), so the board
+// MUST drive its own EPD power pin here — with null hooks GPIO46 is never powered and
+// the panel can't refresh (it just retains the last image). The M5Paper S3 has no
+// PMIC/expander sequence: GPIO46 (EPD_PWR) directly enables the panel's boost rail,
+// matching the community fork's EPD_Painter power sequence.
+bool epdPrepare() {
+  pinMode(EPD_PWR, OUTPUT);
+  digitalWrite(EPD_PWR, LOW);  // start with the rail off
+  return true;
+}
+bool epdPowerOn() {
+  pinMode(EPD_PWR, OUTPUT);
+  digitalWrite(EPD_PWR, HIGH);
+  delayMicroseconds(100);  // let the rail settle before the scan
+  return true;
+}
+void epdPowerOff() { digitalWrite(EPD_PWR, LOW); }
+
+// Tuned fast-refresh waveform for the ED047TC1 (same panel as the LilyGo T5 S3).
+// LovyanGFX's default lut_fast is grainy on this panel and flashes white pixels
+// black for two frames on partial updates; this single waveform drives both the
+// B/W base and the anti-aliased gray overlay cleanly. Ported from
+// BoardT5S3/src/LilyGoT5S3LgfxConfig.cpp (columns 0/15 = B/W drive, 1-6/9-14 = AA
+// gray nudge). Each uint32_t packs 16 2-bit phases.
+#define LUT_MAKE(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, da, db, dc, dd, de, df)                          \
+  (uint32_t)((d0 << 0) | (d1 << 2) | (d2 << 4) | (d3 << 6) | (d4 << 8) | (d5 << 10) | (d6 << 12) |        \
+             (d7 << 14) | (d8 << 16) | (d9 << 18) | (da << 20) | (db << 22) | (dc << 24) | (dd << 26) |   \
+             (de << 28) | (df << 30))
+constexpr uint32_t kFastLut[] = {
+    LUT_MAKE(2, 1, 1, 1, 1, 1, 1, 3, 3, 2, 2, 2, 2, 2, 2, 1),
+    LUT_MAKE(2, 3, 1, 1, 1, 1, 3, 3, 3, 3, 2, 2, 2, 2, 3, 1),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    ~0u,
+    0u,
+};
+#undef LUT_MAKE
+
 }  // namespace
 
 namespace freeink {
@@ -65,10 +108,11 @@ const LgfxEpdConfig& m5paperS3LgfxConfig() {
       EPD_BUS_HZ,
       EPD_LINE_PADDING,
       EPD_ROTATION,
-      {nullptr, nullptr, nullptr},  // no external PMIC/expander: pinPwr (GPIO46) drives the rail
-      // LUT fields left null -> LovyanGFX Panel_EPD default waveforms. If partial
-      // updates show the full-screen black "swipe" seen on the T5 S3, port its
-      // kFastLut here (see BoardT5S3/src/LilyGoT5S3LgfxConfig.cpp).
+      {&epdPrepare, &epdPowerOn, &epdPowerOff},  // drive GPIO46 EPD rail per refresh
+      nullptr, 0,                                          // lutQuality -> LovyanGFX default
+      nullptr, 0,                                          // lutText -> LovyanGFX default
+      kFastLut, sizeof(kFastLut) / sizeof(kFastLut[0]),    // lutFast: tuned ED047TC1 waveform
+      kFastLut, sizeof(kFastLut) / sizeof(kFastLut[0]),    // lutFastest: same
   };
   return cfg;
 }

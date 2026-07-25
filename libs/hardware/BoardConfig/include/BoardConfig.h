@@ -532,7 +532,9 @@ constexpr TouchConfig LILYGO_T5_PRO_GT911 = {
 // frame (rawMax* are the post-swap panel axes 959x539); flipY keeps "up" upright.
 constexpr TouchConfig M5PAPER_S3_GT911 = {
     TouchController::Gt911, 41, 42, 48, PIN_UNASSIGNED, 0x5D, 0, 959, 0, 539, false, 0x14, false,
-    true,  // gt911CoordsAtByte0
+    true,  // gt911CoordsAtByte0=true: verified on hardware — the M5Paper S3 GT911 reports
+           // coords at byte 0 (no track-id), like the classic M5Paper. Raw dumps confirm
+           // byte0 gives in-range x[0-539]/y[0-959]; byte1 gives garbage.
     PIN_UNASSIGNED, true, false, true};  // powerEnable, swapXY=true, flipX=false, flipY=true
 constexpr FrontlightConfig NO_FRONTLIGHT = {PIN_UNASSIGNED, 0, 0, true};
 constexpr AudioConfig NO_AUDIO = {AudioOutput::None,
@@ -1075,6 +1077,13 @@ inline bool isM5PaperV11() { return ACTIVE.board == Board::M5PaperV11; }
 inline bool isSticky() { return ACTIVE.board == Board::Sticky; }
 inline bool isM5PaperS3() { return ACTIVE.board == Board::M5PaperS3; }
 inline bool hasTouch() { return ACTIVE.touch.controller != TouchController::None; }
+// True when the board has any physical navigation button wired (back/confirm/arrows).
+// A board with none is touch-only (e.g. M5Paper S3) — its firmware must keep touch
+// controls enabled or it would have no usable input at all.
+inline bool hasNavButtons() {
+  const auto& i = ACTIVE.input;
+  return i.back >= 0 || i.confirm >= 0 || i.left >= 0 || i.right >= 0 || i.up >= 0 || i.down >= 0;
+}
 inline bool hasPwmFrontlight() { return ACTIVE.frontlight.gpio != PIN_UNASSIGNED; }
 inline bool hasAudio() { return ACTIVE.audio.output != AudioOutput::None; }
 
