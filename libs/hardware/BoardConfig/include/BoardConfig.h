@@ -187,7 +187,7 @@
 // On-board I2C sensors. Each lib (Rtc / EnvironmentSensor / Imu) compiles its
 // I2C driver only when its flag is set; otherwise it links stub bodies.
 #ifndef FREEINK_CAP_RTC
-#define FREEINK_CAP_RTC (FREEINK_DEVICE_X3 || FREEINK_DEVICE_STICKY)
+#define FREEINK_CAP_RTC (FREEINK_DEVICE_X3 || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_M5PAPERS3)
 #endif
 #ifndef FREEINK_CAP_TEMP_HUMIDITY
 #define FREEINK_CAP_TEMP_HUMIDITY (FREEINK_DEVICE_STICKY)
@@ -960,7 +960,9 @@ constexpr BoardProfile M5PAPER_S3 = {
     NO_SDMMC,
     NO_GAUGE,  // battery via ADC, not an I2C gauge
     NO_MIC,
-    NO_SENSORS,  // BM8563 RTC is board-support for now
+    // BM8563 RTC (PCF8563 register-compatible) at 0x51 on the shared touch I2C bus
+    // (SDA41/SCL42, Wire). No temp/humidity or IMU on this board.
+    {41, 42, 400000, 0x51, 0, 0, 0, RtcType::Pcf8563, ImuType::None},
     1.2f,        // uiScale: 4.7" 960x540 touch (~234 PPI) — finger-sized chrome, like LilyGo/M5Paper
     // No power-rail latch: the AXP2101 self-latches after the power button turns it
     // on; software power-off is a GPIO44 pulse handled in board-support, not a latch.
