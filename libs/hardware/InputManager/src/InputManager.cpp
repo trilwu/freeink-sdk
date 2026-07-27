@@ -450,6 +450,27 @@ bool InputManager::hasTouch() const {
 #endif
 }
 
+void InputManager::wakeTouchController() {
+#if FREEINK_CAP_TOUCH
+  const auto& t = BoardConfig::ACTIVE.touch;
+  // Modules without a wired RESET (e.g. the M5Paper S3) can power up — or be left
+  // by a previous firmware, or drift during a long light sleep — in the GT911's
+  // low-power "green"/sleep state, where the coordinate status register (0x814E)
+  // never signals ready (reads 0x00 forever) and no touches are reported. Toggling
+  // the INT line (LOW ~58 ms, HIGH ~2 ms, then release) wakes it, mirroring
+  // LovyanGFX's Touch_GT911::wakeup(). Boards with a RESET pin re-init the
+  // controller instead, so this is a no-op there.
+  if (gt911Addr == 0 || t.reset >= 0 || t.irq < 0) return;
+  pinMode(t.irq, OUTPUT);
+  digitalWrite(t.irq, LOW);
+  delay(58);
+  digitalWrite(t.irq, HIGH);
+  delay(2);
+  pinMode(t.irq, INPUT_PULLUP);
+  delay(10);
+#endif
+}
+
 InputManager::TouchPoint InputManager::getTouchPoint() const { return touchPoint; }
 bool InputManager::isTouchPressed() const { return touchPressed; }
 bool InputManager::wasTouchPressed() const { return touchPressedEvent; }
@@ -788,22 +809,10 @@ void InputManager::beginGt911() {
     probeCandidates();
   }
 
-  // Wake the GT911 into active scanning. Modules without a wired RESET (e.g. the
-  // M5Paper S3) can power up — or be left by a previous firmware — in the GT911's
-  // low-power "green"/sleep state, where the coordinate status register (0x814E)
-  // never signals ready (reads 0x00 forever) and no touches are reported. Toggling
-  // the INT line (LOW ~58 ms, HIGH ~2 ms, then release) wakes it, mirroring
-  // LovyanGFX's Touch_GT911::wakeup(). Only needed on reset-less boards; boards
-  // with a RESET pin already re-init the controller via the reset dance above.
-  if (gt911Addr != 0 && t.reset < 0 && t.irq >= 0) {
-    pinMode(t.irq, OUTPUT);
-    digitalWrite(t.irq, LOW);
-    delay(58);
-    digitalWrite(t.irq, HIGH);
-    delay(2);
-    pinMode(t.irq, INPUT_PULLUP);
-    delay(10);
-  }
+  // Wake the GT911 into active scanning (see #wakeTouchController). Only has an
+  // effect on reset-less boards; boards with a RESET pin already re-init the
+  // controller via the reset dance above.
+  wakeTouchController();
 
   touchDataEnabled = (gt911Addr != 0);
 #ifdef TOUCH_PROBE_DEBUG

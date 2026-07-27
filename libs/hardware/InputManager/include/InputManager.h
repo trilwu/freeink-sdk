@@ -113,6 +113,13 @@ class InputManager {
   // True on the press edge of the GT911 capacitive home key (controllers without
   // one never report it). Cleared each #update().
   bool wasHomeKeyPressed() const;
+  // Re-run the GT911 INT wake toggle (LOW ~58 ms, HIGH ~2 ms, then INPUT_PULLUP).
+  // begin() already does this once; callers that keep the device alive for hours
+  // without a reset (the light-sleep clock loop) can re-run it to recover a
+  // controller that has drifted into its low-power state and stopped reporting.
+  // Drives the INT pin as an output, so no INT-based wake source may be armed.
+  // No-op on boards with a RESET pin, no INT pin, or no detected GT911.
+  void wakeTouchController();
 
   // Optional board hook for buttons that aren't direct GPIOs — e.g. a key behind
   // an I2C IO-expander (the LilyGo T5 S3 user button on its PCA9535). It returns
