@@ -109,12 +109,24 @@
 #else
 #define FREEINK_DRIVER_UC8253_MURPHY 0
 #endif
-// LilyGo T5 S3 / M5Paper S3: raw-parallel ED047TC1-class 960x540 EPD via LovyanGFX
-// (M5GFX). External-bus driver.
-#if FREEINK_DEVICE_LILYGO || FREEINK_DEVICE_M5PAPERS3
+// LilyGo T5 S3: raw-parallel ED047TC1-class 960x540 EPD via LovyanGFX (M5GFX).
+// External-bus driver.
+#if FREEINK_DEVICE_LILYGO
 #define FREEINK_DRIVER_LGFX_EPD 1
 #else
 #define FREEINK_DRIVER_LGFX_EPD 0
+#endif
+// M5Paper S3: same raw-parallel ED047TC1-class 960x540 panel, but driven by
+// EPD_Painter instead of LovyanGFX -- tuned lighter/darker waveform pairs at
+// three quality tiers plus a hand-written LCD_CAM/GDMA pixel pipeline, where
+// LovyanGFX's Panel_EPD has one fast LUT with no lighter/darker asymmetry
+// (see EpdPainterDriver). External-bus driver: EPD_Painter owns LCD_CAM/GDMA
+// directly, exactly like LgfxEpdDriver did, so LgfxEpdDriver must not also be
+// constructed on this board -- both would program the same parallel pins.
+#if FREEINK_DEVICE_M5PAPERS3
+#define FREEINK_DRIVER_EPD_PAINTER 1
+#else
+#define FREEINK_DRIVER_EPD_PAINTER 0
 #endif
 // M5Paper v1.1: ED047TC1 behind an IT8951E timing controller (its own framebuffer
 // SRAM, 16-bit-word SPI with MISO reads). The driver owns its SPI end to end.
@@ -928,8 +940,8 @@ constexpr BoardProfile STICKY = {
     {45, 46}};
 
 // --- M5Paper S3 4.7" (ED047TC1 raw-parallel EPD) — ESP32-S3 ------------------
-// 960x540 16-gray raw parallel panel driven via LovyanGFX (FREEINK_DRIVER_LGFX_EPD),
-// same panel class as the LilyGo T5 S3. Unlike LilyGo's PCA9535 + TPS65185 rig, the
+// 960x540 raw parallel panel driven via EPD_Painter (FREEINK_DRIVER_EPD_PAINTER),
+// same panel class as the LilyGo T5 S3 (which instead uses LovyanGFX). Unlike LilyGo's PCA9535 + TPS65185 rig, the
 // M5Paper S3's EPD rail is a simple boost enabled by the panel PWR pin (GPIO46), so
 // the board-supplied LgfxEpdConfig (m5paperS3LgfxConfig) carries the parallel pins and
 // a lightweight power sequence — see docs/m5papers3-support.md. GT911 capacitive touch
