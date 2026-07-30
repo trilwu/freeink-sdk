@@ -158,6 +158,29 @@ void EpdPainterDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* pr
   const uint32_t srcBytes = geom.bufferSize;  // (width*height)/8
   expandToPacked(fb, srcBytes);
   g_painter.setQuality(qualityFor(mode));
+
+  // In this firmware, Full/Half mean "clean the panel", not merely "use a
+  // nicer waveform" — the reader forces a HALF_REFRESH every
+  // SETTINGS.getRefreshFrequency() pages specifically to shake off
+  // accumulated ghosting. paintPacked() alone is a differential paint
+  // against EPD_Painter's internal packed_screenbuffer and never clears
+  // anything, so without this, ghosting would accumulate on every mode.
+  //
+  // EPD_Painter::clear() (EPD_Painter.cpp) does two things: first a
+  // differential white pass through the normal paint task (using the
+  // quality just set above), which leaves packed_screenbuffer consistently
+  // white; then a raw flicker/shake waveform sequence driven directly at
+  // the hardware that does not touch packed_screenbuffer at all. Net
+  // result: the panel is physically clean and packed_screenbuffer still
+  // accurately reflects "all white", so the paintPacked() below (which
+  // diffs against it) stays correct instead of comparing against a stale
+  // reference.
+  //
+  // Fast stays purely differential/quick, matching LgfxEpdDriver's
+  // epd_fast mapping for that mode.
+  if (mode == RefreshMode::Full || mode == RefreshMode::Half) {
+    g_painter.clear();
+  }
   g_painter.paintPacked(g_packed);
 #else
   (void)fb;
