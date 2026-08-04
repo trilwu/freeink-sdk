@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 #if FREEINK_DRIVER_EPD_PAINTER
 #include <EPD_Painter.h>
@@ -76,7 +77,26 @@ constexpr std::array<BytePair, 256> buildExpandTable() {
 // instead of LgfxEpdDriver's 8-way-branchy per-bit loop.
 constexpr std::array<BytePair, 256> kExpandTable = buildExpandTable();
 
-EPD_Painter g_painter(EPD_PAINTER_PRESET);
+// Constructed from a modified copy of the preset, not the preset verbatim:
+// i2c.sda/scl are forced to -1. EPD_Painter only opens the I2C bus
+// (epd_painter_powerctl.cpp / EPD_Painter.cpp's Wire.begin()) to talk to a
+// TPS65185/PCA9555 power chip, and this preset never sets power.tps_addr (it
+// defaults to -1), so that chip is never present — pin_pwr = 46 drives power
+// via direct GPIO instead. Leaving i2c.scl/sda populated makes EPD_Painter
+// claim the shared bus for nothing, contending with the GT911 touch
+// controller and BM8563 RTC that also live on it. A function-local static
+// (Meyers singleton) avoids static-initialisation-order issues from
+// depending on EPD_PAINTER_PRESET at file-scope static-init time.
+EPD_Painter& painter() {
+  static EPD_Painter::Config config = [] {
+    EPD_Painter::Config cfg = EPD_PAINTER_PRESET;
+    cfg.i2c.sda = -1;
+    cfg.i2c.scl = -1;
+    return cfg;
+  }();
+  static EPD_Painter instance(config);
+  return instance;
+}
 
 // Scratch 2bpp buffer for paintPacked(); sized (width*height)/4, allocated
 // once on first use. PSRAM: OPI PSRAM is enabled for this env (BOARD_HAS_PSRAM)
@@ -119,9 +139,23 @@ void EpdPainterDriver::begin(EpdBus& bus) {
     _ready = false;
     return;
   }
-  _ready = g_painter.begin();
+  _ready = painter().begin();
   if (!_ready) {
     if (Serial) Serial.printf("[epd_painter] FATAL: EPD_Painter::begin() failed — panel not initialised\n");
+  } else {
+    // Boot-time sync: physically clear the sleep cover and sync EPD_Painter's
+    // internal packed_screenbuffer model with the panel. clear() resets that
+    // internal buffer's notion of white, then paintPacked() drives the ink
+    // particles white to match. Without this, every subsequent differential
+    // paint compares against a wrong reference (an uninitialised buffer vs.
+    // whatever the sleep image left on the panel), which is exactly the
+    // faint/ghosted text this fix addresses — see EPD_Painter.cpp:334
+    // ("Zero-init so delta updates assume 'all white' as initial screen
+    // state") and EPD_Painter.S's packed encoding (0b00 = white).
+    memset(g_packed, 0x00, g_packedSize);  // all-white 2bpp frame: every pixel 0b00
+    painter().clear();
+    painter().setQuality(EPD_Painter::Quality::QUALITY_HIGH);
+    painter().paintPacked(g_packed);
   }
 #else
   _ready = false;
@@ -154,7 +188,7 @@ void EpdPainterDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* pr
   // makes ordinary page turns slower than QUALITY_FAST would, but unreadable
   // ghosting is the worse defect; do not "optimise" this back to a
   // mode-dependent quality without re-confirming ghosting stays fixed.
-  g_painter.setQuality(EPD_Painter::Quality::QUALITY_HIGH);
+  painter().setQuality(EPD_Painter::Quality::QUALITY_HIGH);
 
   // Only Full means "clean the panel" — the reader forces a periodic
   // FULL_REFRESH specifically to shake off accumulated ghosting.
@@ -176,9 +210,9 @@ void EpdPainterDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* pr
   // quality changed above, matching the reference implementation, which
   // calls clear() on Full only.
   if (mode == RefreshMode::Full) {
-    g_painter.clear();
+    painter().clear();
   }
-  g_painter.paintPacked(g_packed);
+  painter().paintPacked(g_packed);
 #else
   (void)fb;
   (void)mode;
@@ -190,7 +224,7 @@ void EpdPainterDriver::deepSleep(EpdBus& bus) {
   (void)bus;
 #if FREEINK_DRIVER_EPD_PAINTER
   if (_ready) {
-    g_painter.end();
+    painter().end();
     _ready = false;
   }
 #endif
