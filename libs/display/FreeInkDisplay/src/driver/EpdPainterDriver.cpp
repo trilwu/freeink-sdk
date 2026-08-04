@@ -96,17 +96,6 @@ void expandToPacked(const uint8_t* fb, uint32_t srcBytes) {
   }
 }
 
-EPD_Painter::Quality qualityFor(RefreshMode m) {
-  switch (m) {
-    case RefreshMode::Full:
-      return EPD_Painter::Quality::QUALITY_HIGH;
-    case RefreshMode::Half:
-      return EPD_Painter::Quality::QUALITY_NORMAL;
-    default:
-      return EPD_Painter::Quality::QUALITY_FAST;
-  }
-}
-
 }  // namespace
 #endif  // FREEINK_DRIVER_EPD_PAINTER
 
@@ -157,14 +146,21 @@ void EpdPainterDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* pr
   const PanelGeometry geom = geometry();
   const uint32_t srcBytes = geom.bufferSize;  // (width*height)/8
   expandToPacked(fb, srcBytes);
-  g_painter.setQuality(qualityFor(mode));
 
-  // In this firmware, Full/Half mean "clean the panel", not merely "use a
-  // nicer waveform" — the reader forces a HALF_REFRESH every
-  // SETTINGS.getRefreshFrequency() pages specifically to shake off
-  // accumulated ghosting. paintPacked() alone is a differential paint
-  // against EPD_Painter's internal packed_screenbuffer and never clears
-  // anything, so without this, ghosting would accumulate on every mode.
+  // QUALITY_HIGH (13-step waveform) is used for every refresh mode, not just
+  // Full. QUALITY_NORMAL and QUALITY_FAST use shorter waveforms that don't
+  // fully drive the ink particles, which leaves visible ghost traces on this
+  // panel — confirmed against the working reference implementation. This
+  // makes ordinary page turns slower than QUALITY_FAST would, but unreadable
+  // ghosting is the worse defect; do not "optimise" this back to a
+  // mode-dependent quality without re-confirming ghosting stays fixed.
+  g_painter.setQuality(EPD_Painter::Quality::QUALITY_HIGH);
+
+  // Only Full means "clean the panel" — the reader forces a periodic
+  // FULL_REFRESH specifically to shake off accumulated ghosting.
+  // paintPacked() alone is a differential paint against EPD_Painter's
+  // internal packed_screenbuffer and never clears anything, so without this,
+  // ghosting would accumulate across Full refreshes.
   //
   // EPD_Painter::clear() (EPD_Painter.cpp) does two things: first a
   // differential white pass through the normal paint task (using the
@@ -176,9 +172,10 @@ void EpdPainterDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* pr
   // diffs against it) stays correct instead of comparing against a stale
   // reference.
   //
-  // Fast stays purely differential/quick, matching LgfxEpdDriver's
-  // epd_fast mapping for that mode.
-  if (mode == RefreshMode::Full || mode == RefreshMode::Half) {
+  // Half and Fast stay purely differential/quick — only their waveform
+  // quality changed above, matching the reference implementation, which
+  // calls clear() on Full only.
+  if (mode == RefreshMode::Full) {
     g_painter.clear();
   }
   g_painter.paintPacked(g_packed);
