@@ -2,6 +2,7 @@
 
 #include <BoardConfig.h>
 
+#include <array>
 #include <cstring>
 
 #if FREEINK_DRIVER_LGFX_EPD
@@ -145,7 +146,31 @@ void allocCanvas(uint16_t w, uint16_t h) {
   if (!g_msb) g_msb = static_cast<uint8_t*>(heap_caps_malloc(planeBytes, MALLOC_CAP_SPIRAM));
 }
 
-// Expand a 1-bpp B/W frame (bit set = white) into the 8-bit gray canvas.
+// One expanded output row (8 gray pixels) for a single source byte.
+struct Expand8 {
+  uint8_t px[8];
+};
+
+// 256-entry table mapping each source byte to its 8 expanded gray pixels, built at
+// compile time from kGrayWhite/kGrayBlack so it tracks those constants automatically.
+// Bit order matches the original per-bit loop: MSB (0x80) is the leftmost pixel.
+constexpr Expand8 makeExpand8(uint16_t b) {
+  Expand8 e{};
+  for (uint8_t bit = 0; bit < 8; ++bit) e.px[bit] = (b & (0x80 >> bit)) ? kGrayWhite : kGrayBlack;
+  return e;
+}
+
+constexpr auto makeExpandTable() {
+  std::array<Expand8, 256> table{};
+  for (uint16_t b = 0; b < 256; ++b) table[b] = makeExpand8(b);
+  return table;
+}
+
+constexpr auto kExpandTable = makeExpandTable();
+
+// Expand a 1-bpp B/W frame (bit set = white) into the 8-bit gray canvas. Uses a
+// 256-entry lookup table (kExpandTable) so each source byte costs one 8-byte copy
+// instead of 8 branchy per-bit iterations.
 void fillCanvasBW(const uint8_t* fb) {
   if (!g_canvas) return;
   auto* dst = static_cast<uint8_t*>(g_canvas->getBuffer());
@@ -154,8 +179,10 @@ void fillCanvasBW(const uint8_t* fb) {
     const uint8_t* src = fb + static_cast<uint32_t>(y) * g_wb;
     uint8_t* drow = dst + static_cast<uint32_t>(y) * g_w;
     for (uint16_t bx = 0; bx < g_wb; ++bx) {
-      const uint8_t b = src[bx];
-      for (uint8_t bit = 0; bit < 8; ++bit) drow[bx * 8 + bit] = (b & (0x80 >> bit)) ? kGrayWhite : kGrayBlack;
+      // dst's alignment is not guaranteed by the sprite allocator (heap_caps_malloc
+      // with MALLOC_CAP_8BIT only), so a wide uint64_t store here is unprovably
+      // safe; memcpy lets the compiler pick a correct (and still fast) access width.
+      memcpy(drow + bx * 8, kExpandTable[src[bx]].px, 8);
     }
   }
 }
