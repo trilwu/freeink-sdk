@@ -111,23 +111,28 @@
 #endif
 // LilyGo T5 S3: raw-parallel ED047TC1-class 960x540 EPD via LovyanGFX (M5GFX).
 // External-bus driver.
-#if FREEINK_DEVICE_LILYGO
+// The M5Paper S3 shares this panel class and driver.
+#if FREEINK_DEVICE_LILYGO || FREEINK_DEVICE_M5PAPERS3
 #define FREEINK_DRIVER_LGFX_EPD 1
 #else
 #define FREEINK_DRIVER_LGFX_EPD 0
 #endif
-// M5Paper S3: same raw-parallel ED047TC1-class 960x540 panel, but driven by
-// EPD_Painter instead of LovyanGFX -- tuned lighter/darker waveform pairs at
-// three quality tiers plus a hand-written LCD_CAM/GDMA pixel pipeline, where
-// LovyanGFX's Panel_EPD has one fast LUT with no lighter/darker asymmetry
-// (see EpdPainterDriver). External-bus driver: EPD_Painter owns LCD_CAM/GDMA
-// directly, exactly like LgfxEpdDriver did, so LgfxEpdDriver must not also be
-// constructed on this board -- both would program the same parallel pins.
-#if FREEINK_DEVICE_M5PAPERS3
-#define FREEINK_DRIVER_EPD_PAINTER 1
-#else
+// EPD_Painter: vendored ED047TC1 driver, currently unused.
+//
+// It was wired up for the M5Paper S3 and reverted. Its waveforms are better --
+// lighter/darker pairs at three quality tiers, against LovyanGFX's single fast
+// LUT -- and whites did come out visibly cleaner. But EPD_Painter is built
+// around a differential model of what is on the panel, and the reference
+// implementation it comes from feeds that model complete 8bpp frames from an
+// 8bpp renderer. This firmware's GfxRenderer is 1bpp packed with separate
+// grey bit-planes, so the model drifted and ghosting kept returning no matter
+// which symptom was chased (boot sync, quality tier, clear-on-full, packing --
+// all verified correct in isolation).
+//
+// Revisit only after GfxRenderer gains a native 8bpp path, which is what the
+// reference design actually depends on. The vendored library is kept because
+// its waveform tables are a useful reference for tuning kFastLut.
 #define FREEINK_DRIVER_EPD_PAINTER 0
-#endif
 // M5Paper v1.1: ED047TC1 behind an IT8951E timing controller (its own framebuffer
 // SRAM, 16-bit-word SPI with MISO reads). The driver owns its SPI end to end.
 #if FREEINK_DEVICE_M5PAPER
