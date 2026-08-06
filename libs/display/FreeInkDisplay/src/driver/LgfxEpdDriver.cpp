@@ -103,6 +103,34 @@ class FreeInkLgfxEpd : public lgfx::LGFX_Device {
 
 FreeInkLgfxEpd g_dev;
 
+// Fast stays on epd_fast; Full/Half use epd_text.
+//
+// This looks like the obvious mapping, but it was arrived at by elimination --
+// recording it so the alternatives are not retried:
+//
+//   epd_fast everywhere: no flash and quick, but its LUT holds columns 1-14
+//     (only 0 and 15 are ever driven), so it cannot render a gray at all.
+//     Antialiased glyph edges come out thin and jagged, and any pixel left at
+//     an intermediate level is held there forever -- the long-standing black
+//     speckles in blank white areas.
+//   epd_text everywhere: grays render and text is genuinely sharp, but its
+//     first phases are almost all 2 (lighten), i.e. it clears to white before
+//     drawing. That is a white flash on every page turn.
+//   Mixed (fast base + text gray overlay): Panel_EPD's per-pixel diff keys on
+//     the mode's LUT offset, so consecutive pushes under different modes make
+//     every pixel look changed and the whole screen is re-driven -- a black
+//     flash.
+//
+// So with antialiasing on, some flash is unavoidable here. The underlying
+// reason is structural: a real grayscale waveform for this panel is a 16x16
+// from->to matrix per phase (see epdiy's ED047TC1 tables, 30 phases), while
+// this LUT is one uint32_t per phase = 16 target columns with no origin
+// dimension. Without knowing a pixel's origin level, any waveform that renders
+// grays reliably has to clear first.
+//
+// Full/Half keeping epd_text is deliberate and load-bearing: it drives all 16
+// columns, so the periodic ghost-cleanup refresh is what sweeps out pixels
+// stranded at intermediate levels.
 lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
   switch (m) {
     case RefreshMode::Full: return lgfx::epd_mode::epd_text;
@@ -293,10 +321,40 @@ void LgfxEpdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
   (void)factoryMode;
 #if FREEINK_DRIVER_LGFX_EPD
   fillCanvasGray(fb);  // combine base + LSB/MSB planes -> 4-level gray
-  // Same mode as the B/W base push: Panel_EPD's per-pixel diff keys on the
-  // epd_mode LUT offset, so switching modes here would re-drive every pixel
-  // (full-screen inversion flash). The board's fast LUT carries both the B/W
-  // drive and the AA gray-nudge columns, so one mode serves both pushes.
+  // EXPERIMENT (2026-07-29): epd_text, not epd_fast.
+  //
+  // The previous comment here claimed the board's fast LUT "carries both the
+  // B/W drive and the AA gray-nudge columns". That is not true of this panel's
+  // LUT, nor of LovyanGFX's own lut_fast it derives from: in every phase row,
+  // columns 1-14 are all 3 (hold) and only columns 0 and 15 -- pure black and
+  // pure white -- are driven. GfxRenderer's grays land on columns 5 and 10, so
+  // under epd_fast they are never driven at all. Antialiased glyph edges came
+  // out thinner but no smoother, because the gray was never rendered.
+  //
+  // It also explains the long-standing black specks in blank white areas: a
+  // pixel left at an intermediate level is held by 3 forever, so nothing ever
+  // drives it back to white.
+  //
+  // lut_text drives all 16 columns across 12 phases -- a real grayscale
+  // waveform. The cost is the flash the old comment warned about: Panel_EPD's
+  // per-pixel diff keys on the epd_mode LUT offset, so alternating modes
+  // between the base push and this one defeats the diff and re-drives the
+  // whole screen on every antialiased page turn.
+  //
+  // Both were tried on hardware. epd_text here did make antialiased text
+  // genuinely sharp -- the grays rendered -- but paired with the epd_fast base
+  // push it flashed black every page, and matching the base to epd_text traded
+  // that for a white flash, because epd_text's opening phases are almost all 2
+  // (lighten): it clears before drawing. Neither was comfortable to read.
+  //
+  // So this stays epd_fast: with antialiasing off (the recommended setting on
+  // this board) the gray path is not used at all, and page turns are quick and
+  // flash-free. Antialiasing on remains available and unchanged from before --
+  // thin, aliased edges, but no flash.
+  //
+  // Doing better needs the origin dimension this LUT format lacks; see the
+  // epdModeFor() comment above. Do not re-try epd_text here without also
+  // solving the base-push mode, and expect a flash either way.
   pushCanvas(lgfx::epd_mode::epd_fast);
   if (turnOff) g_dev.sleep();
 #else
