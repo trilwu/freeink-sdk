@@ -180,8 +180,18 @@ void batteryIndicator(Frame<MaxInteractions>& frame, Rect rect,
       }
     }
   } else {
-    const int16_t fillW = static_cast<int16_t>(
+    int16_t fillW = static_cast<int16_t>(
         (static_cast<int32_t>(cavity.width) * percent) / 100);
+    // The charging bolt draws in the inverse color over the fill; guarantee
+    // enough fill under it to stay visible at low charge (the bolt is
+    // centered, so cover past the cavity midpoint plus the bolt half-width).
+    if (props.charging && !props.chargingIcon) {
+      const int16_t boltHalf =
+          static_cast<int16_t>(((cavity.height - 2) / 2 > 2 ? (cavity.height - 2) / 2 : 2));
+      int16_t minFill = static_cast<int16_t>(cavity.width / 2 + boltHalf + 1);
+      if (minFill > cavity.width) minFill = cavity.width;
+      if (fillW < minFill) fillW = minFill;
+    }
     if (fillW > 0) {
       frame.target().fill(Rect{cavity.x, cavity.y, fillW, cavity.height}, ink);
     }
@@ -194,25 +204,28 @@ void batteryIndicator(Frame<MaxInteractions>& frame, Rect rect,
                             static_cast<int16_t>(props.chargingIcon.height)}),
           props.chargingIcon, BitmapMode::Center, ink);
     } else {
-      // Lightning bolt from two triangles, drawn in the inverse color so it
-      // reads over both the filled and empty parts of the cavity.
-      const Paint bolt = Paint::solid(invertedColor(props.color));
-      const int16_t cx = static_cast<int16_t>(cavity.x + cavity.width / 2);
-      const int16_t cy = static_cast<int16_t>(cavity.y + cavity.height / 2);
-      const int16_t h = static_cast<int16_t>(cavity.height - 2);
-      const int16_t w = static_cast<int16_t>(h / 2 > 2 ? h / 2 : 2);
-      frame.target().triangle(
-          Point{static_cast<int16_t>(cx + w / 2),
-                static_cast<int16_t>(cy - h / 2)},
-          Point{static_cast<int16_t>(cx - w), static_cast<int16_t>(cy + 1)},
-          Point{static_cast<int16_t>(cx + 1), static_cast<int16_t>(cy + 1)},
-          bolt);
-      frame.target().triangle(
-          Point{static_cast<int16_t>(cx - w / 2),
-                static_cast<int16_t>(cy + h / 2)},
-          Point{static_cast<int16_t>(cx + w), static_cast<int16_t>(cy - 1)},
-          Point{static_cast<int16_t>(cx - 1), static_cast<int16_t>(cy - 1)},
-          bolt);
+      // Hand-drawn 5x8 bolt mask: at glyph-cavity sizes (~8 px) rasterized
+      // triangles degenerate into a blob, so the shape is pixel-authored.
+      // Drawn in the inverse color so it reads over both the filled and empty
+      // parts of the cavity.
+      static constexpr uint8_t BOLT_5X8[] = {
+          0x18,  // ...XX
+          0x30,  // ..XX.
+          0x60,  // .XX..
+          0xF8,  // XXXXX
+          0x30,  // ..XX.
+          0x60,  // .XX..
+          0xC0,  // XX...
+          0x80,  // X....
+      };
+      BitmapRef boltMask;
+      boltMask.data = BOLT_5X8;
+      boltMask.width = 5;
+      boltMask.height = 8;
+      boltMask.format = BitmapFormat::BW1;  // set bit = ink
+      frame.target().bitmap(centeredRect(cavity, Size{5, 8}), boltMask,
+                            BitmapMode::Center,
+                            Paint::solid(invertedColor(props.color)));
     }
   }
   if (props.label) {

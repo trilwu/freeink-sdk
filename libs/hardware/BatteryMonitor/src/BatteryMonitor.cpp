@@ -67,6 +67,119 @@ bool readReg8(uint8_t addr, uint8_t reg, uint8_t& out) {
   return true;
 }
 
+bool writeReg8(uint8_t addr, uint8_t reg, uint8_t val) {
+  if (addr == 0) return false;
+  ensureWire();
+  TwoWire& w = gaugeWire();
+  w.beginTransmission(addr);
+  w.write(reg);
+  w.write(val);
+  return w.endTransmission(true) == 0;
+}
+
+// --- CW2017 (CellWise) fuel gauge -------------------------------------------
+// Register map + init recovered from the Xteink X4 Pro OEM firmware (the
+// XTEink::Cw2017PowerHal class in app1) via Ghidra. Unlike the BQ27220, the CW2017
+// reports 0% until a matching 80-byte BATINFO battery profile is resident, so init
+// must verify/upload one before SoC reads mean anything.
+constexpr uint8_t CW2017_REG_VERSION = 0x00;  // running state in (ver & 0xFD) == 0x0D
+constexpr uint8_t CW2017_REG_VCELL_H = 0x02;  // 14-bit VCELL, big-endian over 0x02/0x03
+constexpr uint8_t CW2017_REG_SOC = 0x04;      // integer percent (0x05 = fraction, unused)
+constexpr uint8_t CW2017_REG_MODE = 0x08;     // soft-reset / sleep control
+constexpr uint8_t CW2017_REG_CONFIG = 0x0B;   // bit7 = profile-loaded / update-enable
+constexpr uint8_t CW2017_REG_BATINFO = 0x10;  // 80-byte profile spans 0x10..0x5F
+
+// The exact BATINFO profile the OEM uploads (app1 table @ DROM 0x3c5d8d00). This is
+// battery-model-specific; it is the profile for the X4 Pro's cell.
+constexpr uint8_t CW2017_BATINFO[80] = {
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0xbf, 0xb5, 0xb4, 0xa4, 0x9c, 0xeb, 0xe2,
+    0xdf, 0xe5, 0xca, 0xa0, 0x8a, 0x62, 0x53, 0x48, 0x40, 0x3a, 0x32, 0xb1, 0xae, 0xda, 0xb5, 0xff,
+    0xff, 0xff, 0xe8, 0xdb, 0xd9, 0xd6, 0xd4, 0xd2, 0xd0, 0xcb, 0xc3, 0xbc, 0x9e, 0x87, 0x7b, 0x71,
+    0x72, 0x7c, 0x8c, 0xa3, 0xb7, 0xc8, 0xa5, 0x4f, 0x00, 0x00, 0xab, 0x02, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23};
+
+// Soft-reset: MODE 0xF0 -> 0x30 -> 0x00, 20 ms apart (OEM FUN_4215042c).
+void cw2017Reset(uint8_t addr) {
+  writeReg8(addr, CW2017_REG_MODE, 0xF0);
+  delay(20);
+  writeReg8(addr, CW2017_REG_MODE, 0x30);
+  delay(20);
+  writeReg8(addr, CW2017_REG_MODE, 0x00);
+  delay(20);
+}
+
+// One-shot: make sure a valid BATINFO profile is loaded. Wakes/resets the gauge if it
+// isn't running, then uploads+enables the profile only if the resident bytes don't
+// already match (the OEM leaves it resident across warm boots, so this is usually a
+// verify-only no-op). Bounded polling so a cold gauge can't stall boot.
+void cw2017EnsureProfile(uint8_t addr) {
+  uint8_t ver = 0;
+  if (!readReg8(addr, CW2017_REG_VERSION, ver)) return;  // gauge absent; nothing to do
+  if ((ver & 0xFD) != 0x0D) cw2017Reset(addr);
+
+  uint8_t cfg = 0;
+  if (readReg8(addr, CW2017_REG_CONFIG, cfg) && (cfg & 0x80)) {
+    bool match = true;
+    for (uint8_t i = 0; i < sizeof(CW2017_BATINFO); ++i) {
+      uint8_t b = 0;
+      if (!readReg8(addr, static_cast<uint8_t>(CW2017_REG_BATINFO + i), b) || b != CW2017_BATINFO[i]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return;  // correct profile already loaded
+  }
+
+  for (uint8_t i = 0; i < sizeof(CW2017_BATINFO); ++i) {
+    writeReg8(addr, static_cast<uint8_t>(CW2017_REG_BATINFO + i), CW2017_BATINFO[i]);
+  }
+  writeReg8(addr, CW2017_REG_CONFIG, 0x80);  // update-enable (bit7); alert threshold = 0
+  delay(20);
+  cw2017Reset(addr);
+  for (int i = 0; i < 50; ++i) {  // ~1 s cap for the SoC to become valid
+    uint8_t soc = 0;
+    if (readReg8(addr, CW2017_REG_SOC, soc) && soc <= 100) break;
+    delay(20);
+  }
+}
+
+// SoC (0..100) from the active gauge, dispatched by type. false on I2C failure.
+bool readGaugeSoc(uint16_t& out) {
+  const auto& g = BoardConfig::ACTIVE.batteryGauge;
+  if (g.gaugeType == BoardConfig::GaugeType::Cw2017) {
+    static bool inited = false;
+    if (!inited) {
+      cw2017EnsureProfile(g.gaugeAddr);
+      inited = true;
+    }
+    uint8_t soc = 0;
+    if (!readReg8(g.gaugeAddr, CW2017_REG_SOC, soc)) return false;
+    out = soc > 100 ? 100 : soc;
+    return true;
+  }
+  uint16_t soc = 0;
+  if (!readReg16(g.gaugeAddr, BQ27220_STATE_OF_CHARGE, soc)) return false;
+  out = soc > 100 ? 100 : soc;
+  return true;
+}
+
+// Battery voltage (mV) from the active gauge, dispatched by type. false on failure.
+bool readGaugeMillivolts(uint16_t& out) {
+  const auto& g = BoardConfig::ACTIVE.batteryGauge;
+  if (g.gaugeType == BoardConfig::GaugeType::Cw2017) {
+    uint8_t hi = 0, lo = 0;
+    if (!readReg8(g.gaugeAddr, CW2017_REG_VCELL_H, hi)) return false;
+    if (!readReg8(g.gaugeAddr, static_cast<uint8_t>(CW2017_REG_VCELL_H + 1), lo)) return false;
+    const uint16_t raw14 = static_cast<uint16_t>((hi & 0x3F) << 8) | lo;
+    out = static_cast<uint16_t>((raw14 * 5 + 8) >> 4);  // OEM formula (~0.3125 mV/LSB, rounded)
+    return true;
+  }
+  uint16_t mv = 0;
+  if (!readReg16(g.gaugeAddr, BQ27220_VOLTAGE, mv)) return false;
+  out = mv;
+  return true;
+}
+
 // Charging state for an I2C-gauge board, from the active board's gauge config.
 // Two sources, in order of preference:
 //   1. A dedicated charger IC (BQ25896): CHRG_STAT in REG0B[4:3] — 01 pre-charge
@@ -80,6 +193,12 @@ bool readReg8(uint8_t addr, uint8_t reg, uint8_t& out) {
 // a board with neither gaugeAddr nor chargerAddr).
 bool readGaugeCharging(bool& known) {
   const auto& g = BoardConfig::ACTIVE.batteryGauge;
+  // CW2017 has no current register and the X4 Pro has no charger IC on this bus, so
+  // charging state is not observable from the gauge (the OEM infers it elsewhere).
+  if (g.gaugeType == BoardConfig::GaugeType::Cw2017) {
+    known = false;
+    return false;
+  }
   if (g.chargerAddr != 0) {
     uint8_t status = 0;
     if (readReg8(g.chargerAddr, BQ25896_REG_STATUS, status)) {
@@ -101,16 +220,12 @@ bool readGaugeCharging(bool& known) {
 
 namespace {
 constexpr uint8_t M5PM1_REG_PWR_SRC = 0x04;
-constexpr uint8_t M5PM1_REG_VBAT_L = 0x22;
-constexpr uint8_t M5PM1_REG_VIN_L = 0x24;
-constexpr uint8_t M5PM1_REG_5VINOUT_L = 0x26;
-constexpr uint16_t M5PM1_EXTERNAL_POWER_PRESENT_MV = 1000;
+constexpr uint8_t M5PM1_REG_VREF_L = 0x20;
+constexpr uint8_t M5PM1_PWR_SRC_5VIN = 1u << 0;
+constexpr uint8_t M5PM1_PWR_SRC_5VINOUT = 1u << 1;
 
-bool readM5Pm1Reg16(uint8_t reg, uint16_t& out) {
-  uint16_t raw = 0;
-  if (!freeink::m5pm1::readReg16(reg, &raw)) return false;
-  out = raw & 0x0FFF;  // voltage registers carry 12 significant bits
-  return true;
+uint16_t readLe16(const uint8_t* bytes) {
+  return static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8);
 }
 }  // namespace
 
@@ -138,17 +253,17 @@ bool BatteryMonitor::hasGaugeBackend() const {
 }
 
 bool BatteryMonitor::hasM5Pm1Backend() const {
-  return BoardConfig::isM5StackPaperColor();
+  return BoardConfig::isM5StackPaperColor() || BoardConfig::isPaperMono();
 }
 
 uint16_t BatteryMonitor::readPercentage() const {
 #if FREEINK_BATTERY_I2C_GAUGE
-  // Runtime, per active profile: gauge boards (X3, LilyGo) read SoC over I2C; ADC
-  // boards (X4) in the same binary fall through to the divider path below.
+  // Runtime, per active profile: gauge boards (X3, LilyGo, X4 Pro) read SoC over I2C;
+  // ADC boards (X4) in the same binary fall through to the divider path below.
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
     uint16_t soc = 0;
-    if (!readReg16(BoardConfig::ACTIVE.batteryGauge.gaugeAddr, BQ27220_STATE_OF_CHARGE, soc)) return 0;
-    return soc > 100 ? 100 : soc;
+    if (!readGaugeSoc(soc)) return 0;
+    return soc;
   }
 #endif
   if (hasM5Pm1Backend()) {
@@ -164,8 +279,8 @@ bool BatteryMonitor::readPercentageChecked(uint16_t& out) const {
 #if FREEINK_BATTERY_I2C_GAUGE
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
     uint16_t soc = 0;
-    if (!readReg16(BoardConfig::ACTIVE.batteryGauge.gaugeAddr, BQ27220_STATE_OF_CHARGE, soc)) return false;
-    out = soc > 100 ? 100 : soc;
+    if (!readGaugeSoc(soc)) return false;
+    out = soc;
     return true;
   }
 #endif
@@ -187,12 +302,12 @@ BatteryMonitor::Status BatteryMonitor::readStatus() const {
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
     status.supported = true;
     uint16_t soc = 0;
-    if (readReg16(BoardConfig::ACTIVE.batteryGauge.gaugeAddr, BQ27220_STATE_OF_CHARGE, soc)) {
+    if (readGaugeSoc(soc)) {
       status.percentageKnown = true;
-      status.percentage = soc > 100 ? 100 : soc;
+      status.percentage = soc;
     }
     uint16_t mv = 0;
-    if (readReg16(BoardConfig::ACTIVE.batteryGauge.gaugeAddr, BQ27220_VOLTAGE, mv)) {
+    if (readGaugeMillivolts(mv)) {
       status.millivoltsKnown = true;
       status.millivolts = mv;
     }
@@ -231,7 +346,7 @@ uint16_t BatteryMonitor::readMillivolts() const {
 #if FREEINK_BATTERY_I2C_GAUGE
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
     uint16_t gaugeMv = 0;
-    readReg16(BoardConfig::ACTIVE.batteryGauge.gaugeAddr, BQ27220_VOLTAGE, gaugeMv);
+    readGaugeMillivolts(gaugeMv);
     return gaugeMv;  // gauge reports true battery mV (no divider)
   }
 #endif
@@ -287,51 +402,96 @@ bool BatteryMonitor::readM5Pm1Status(Status& status) const {
 
   freeink::m5pm1::beginBus();
 
-  uint16_t batMv = 0;
-  if (readM5Pm1Reg16(M5PM1_REG_VBAT_L, batMv)) {
+  // VREF/VBAT/VIN/5VOUT are four complete 16-bit little-endian millivolt
+  // registers (0x20..0x27). Only ADC_RES at 0x28 is 12-bit. Read the whole
+  // block atomically so paired bytes and the three rails share one sample.
+  uint8_t rails[8] = {};
+  const bool railsKnown = freeink::m5pm1::readBytes(M5PM1_REG_VREF_L, rails, sizeof(rails));
+  if (railsKnown) {
+    const uint16_t batMv = readLe16(rails + 2);
+    const uint16_t vinMv = readLe16(rails + 4);
+    const uint16_t vinOutMv = readLe16(rails + 6);
     status.millivoltsKnown = true;
     status.millivolts = batMv;
     status.percentageKnown = true;
     status.percentage = percentageFromMillivolts(batMv);
+    status.pm1VinMv = vinMv;
+    status.pm1VinOutMv = vinOutMv;
   }
 
-  // External power can arrive on either rail: 5VIN (DC input) or 5VINOUT (the
-  // bidirectional USB-C port on PaperColor), so a supply on either one counts.
-  uint16_t vinMv = 0;
-  uint16_t vinOutMv = 0;
-  const bool vinKnown = readM5Pm1Reg16(M5PM1_REG_VIN_L, vinMv);
-  const bool vinOutKnown = readM5Pm1Reg16(M5PM1_REG_5VINOUT_L, vinOutMv);
-  if (vinKnown) status.pm1VinMv = vinMv;
-  if (vinOutKnown) status.pm1VinOutMv = vinOutMv;
   uint8_t powerSource = 0;
   const bool pwrSrcKnown = freeink::m5pm1::readReg(M5PM1_REG_PWR_SRC, &powerSource);
-  if (pwrSrcKnown) status.pm1PowerSource = powerSource & 0x07;
-  if (vinKnown || vinOutKnown) {
+  if (pwrSrcKnown) {
+    const uint8_t sources = powerSource & 0x07;
+    status.pm1PowerSource = sources;
     status.externalPowerKnown = true;
-    status.externalPower = (vinKnown && vinMv > M5PM1_EXTERNAL_POWER_PRESENT_MV) ||
-                           (vinOutKnown && vinOutMv > M5PM1_EXTERNAL_POWER_PRESENT_MV);
-  } else if (pwrSrcKnown) {
-    status.externalPowerKnown = true;
-    status.externalPower = (powerSource & 0x07) == 0;
+    // PM1 manual: PWR_SRC is a bitmap, not the enum used by older M5PM1
+    // wrappers. Multiple bits may be set at once (the connected Paper Mono
+    // reports 0x05 = BAT | 5VIN). Unlike the ADC rail samples, these validity
+    // bits drop when the cable is removed, so they are the authoritative
+    // source for the charging badge.
+    status.externalPower = (sources & (M5PM1_PWR_SRC_5VIN | M5PM1_PWR_SRC_5VINOUT)) != 0;
   }
 
-  // M5PM1 exposes input power and battery voltage on PaperColor here. It does
-  // not expose a proven separate charge-phase bit in this lightweight PM1 map,
-  // so keep charging unknown instead of equating USB power with active charging.
+  // Product semantics for Paper Mono: external supply present means charging.
+  status.chargingKnown = status.externalPowerKnown;
+  status.charging = status.externalPower;
   return status.percentageKnown || status.millivoltsKnown || status.externalPowerKnown;
 }
 
-uint16_t BatteryMonitor::percentageFromMillivolts(uint16_t millivolts) {
-  double volts = millivolts / 1000.0;
-  // Polynomial derived from LiPo samples
-  double y = -144.9390 * volts * volts * volts +
-             1655.8629 * volts * volts -
-             6158.8520 * volts +
-             7501.3202;
+// Standard 1S Li-ion / LiPo (4.20 V) rest-voltage discharge curve, one entry per
+// 10% notch. The curve is deliberately not resampled any finer: between 20% and
+// 60% the whole span is ~130 mV, so a tenth of a volt-step is already below the
+// noise of any of the three backends. A caller that needs real resolution should
+// read millivolts and show those instead.
+//
+// The 0% anchor is 3.45 V rather than the cell's protection cut-off. Below that
+// the pack falls off a cliff and the remaining runtime is minutes, so reporting
+// it as empty is honest; it also leaves headroom for the sag under an e-ink
+// refresh, which is the heaviest load this device draws.
+constexpr uint16_t LIION_NOTCH_MV[11] = {
+    3450,  //   0%
+    3680,  //  10%
+    3740,  //  20%
+    3770,  //  30%
+    3790,  //  40%
+    3820,  //  50%
+    3870,  //  60%
+    3920,  //  70%
+    3980,  //  80%
+    4060,  //  90%
+    4200,  // 100%
+};
 
-  // Clamp to [0,100] and round
-  y = std::max(y, 0.0);
-  y = std::min(y, 100.0);
-  y = round(y);
-  return static_cast<uint16_t>(y);
+// A notch change has to clear the boundary by this much before it is accepted.
+// The 20-40% band is only 50 mV wide, so without a deadband a few millivolts of
+// sampler noise would swap the icon back and forth between page turns. Kept
+// well under the narrowest half-segment (10 mV) so no notch can become a trap.
+constexpr uint16_t NOTCH_HYSTERESIS_MV = 8;
+
+uint16_t BatteryMonitor::percentageFromMillivolts(uint16_t millivolts) {
+  // A failed read reports 0 mV, which lands on 0% here. That is deliberate: the
+  // cubic this table replaced evaluated to +7501 at 0 V and clamped to a
+  // confident 100%, so an I2C or ADC failure showed a full battery.
+  if (millivolts >= LIION_NOTCH_MV[10]) return 100;
+  // Round at the midpoint of each segment instead of flooring, so a cell resting
+  // just below 4.20 V straight off the charger still reads 100%.
+  for (uint8_t i = 10; i > 0; --i) {
+    const uint16_t boundary = static_cast<uint16_t>((LIION_NOTCH_MV[i - 1] + LIION_NOTCH_MV[i]) / 2);
+    if (millivolts >= boundary) return static_cast<uint16_t>(i * 10);
+  }
+  return 0;
+}
+
+uint16_t BatteryMonitor::percentageFromMillivolts(uint16_t millivolts, uint16_t previousPercent) {
+  const uint16_t notch = percentageFromMillivolts(millivolts);
+  if (previousPercent > 100) return notch;  // no usable history
+  const uint16_t previousNotch = static_cast<uint16_t>((previousPercent / 10) * 10);
+  if (notch == previousNotch) return notch;
+
+  // Re-run the lookup with the sample pushed back toward the notch we are
+  // leaving. If it still crosses, the move is real; if not, hold.
+  const int32_t bias = notch > previousNotch ? -NOTCH_HYSTERESIS_MV : NOTCH_HYSTERESIS_MV;
+  const int32_t biased = std::clamp<int32_t>(static_cast<int32_t>(millivolts) + bias, 0, UINT16_MAX);
+  return percentageFromMillivolts(static_cast<uint16_t>(biased)) == notch ? notch : previousNotch;
 }

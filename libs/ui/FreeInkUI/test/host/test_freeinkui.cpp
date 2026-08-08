@@ -556,6 +556,39 @@ void testListClampsBadTopIndex() {
   CHECK_EQ(interactions.data()[3].value, 5);
 }
 
+void testListCanUseFullTitleWidthWithShortValue() {
+  ListItem item{};
+  item.label = "This filename is deliberately long enough to require a two-line wrapped title";
+  item.value = ".epub";
+
+  ListProps props;
+  props.items = &item;
+  props.count = 1;
+  props.rowHeight = 48;
+  props.labelText.maxLines = 2;
+
+  FakeDrawTarget balancedDraw;
+  DeviceContext device = makeDevice();
+  InputSnapshot input;
+  InteractionBuffer<4> balancedInteractions;
+  Frame<4> balancedFrame(balancedDraw, device, input, balancedInteractions);
+  list(balancedFrame, Rect{0, 0, 480, 48}, props);
+
+  // Fill, value, then label. The default balanced layout limits a wrapping
+  // title to 60% of the row's text band.
+  CHECK_EQ(balancedDraw.ops[2].rect.width, 278);
+
+  props.balanceWrappedLabelWithValue = false;
+  FakeDrawTarget fullWidthDraw;
+  InteractionBuffer<4> fullWidthInteractions;
+  Frame<4> fullWidthFrame(fullWidthDraw, device, input, fullWidthInteractions);
+  list(fullWidthFrame, Rect{0, 0, 480, 48}, props);
+
+  // Only the extension and its normal gap are reserved, so the title can use
+  // the remaining width before the value.
+  CHECK_EQ(fullWidthDraw.ops[2].rect.width, 424);
+}
+
 void testButtonRegistersExpandedHit() {
   FakeDrawTarget draw;
   DeviceContext device = makeDevice();
@@ -979,6 +1012,43 @@ void testInteractionOverflowFlag() {
   CHECK(!buffer.overflowed());
 }
 
+void testContentWidthTabBarLayout() {
+  FakeDrawTarget draw;
+  DeviceContext device = makeDevice();
+  InputSnapshot input;
+  InteractionBuffer<8> interactions;
+  Frame<8> frame(draw, device, input, interactions);
+
+  TabItem tabs[2];
+  tabs[0].label = "One";
+  tabs[0].value = 10;
+  tabs[0].selected = true;
+  tabs[1].label = "Longer";
+  tabs[1].value = 20;
+  TabBarProps bar;
+  bar.tabs = tabs;
+  bar.count = 2;
+  bar.action = 60;
+  bar.layout = TabBarLayout::ContentWidth;
+  bar.leadingInset = 20;
+  bar.gap = 8;
+  bar.tabInset = Insets{2, 0, 4, 0};
+  bar.contentInset = Insets{2, 8, 2, 8};
+  tabBar(frame, Rect{0, 0, 480, 40}, bar);
+
+  CHECK_EQ(interactions.count(), 2u);
+  // Monospace labels are 18px and 36px wide. With 8px content padding,
+  // pills start at x=20 and x=62 instead of being centered in 240px slots.
+  CHECK_EQ(draw.ops[0].rect.x, 20);
+  CHECK_EQ(draw.ops[0].rect.width, 34);
+  CHECK_EQ(draw.ops[2].rect.x, 62);
+  CHECK_EQ(draw.ops[2].rect.width, 52);
+  InputSnapshot tap;
+  tap.touchReleased = true;
+  tap.touchX = 70;
+  tap.touchY = 20;
+  CHECK_EQ(interactions.route(tap).value, 20);
+}
 
 void testRoundedRaffSurfaces() {
   // Mirrors the retired RoundedRaffTheme: pill settings tabs with a bottom
@@ -2519,6 +2589,7 @@ int main() {
   testListHelpers();
   testListVirtualization();
   testListClampsBadTopIndex();
+  testListCanUseFullTitleWidthWithShortValue();
   testButtonRegistersExpandedHit();
   testProgressBarClamps();
   testBatteryIndicator();
@@ -2529,6 +2600,7 @@ int main() {
   testCrossInkReaderMenuList();
   testCrossInkReadingStatsSurfaces();
   testInteractionOverflowFlag();
+  testContentWidthTabBarLayout();
   testRoundedRaffSurfaces();
   testThemePrimitiveParity();
   testRotationAndBitmapSampling();
